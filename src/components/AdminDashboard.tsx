@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { functions, account } from '../lib/appwrite';
 import { useNavigate } from 'react-router-dom';
-import notificationLogo from '../assets/Notification-light.png';
 
 export function AdminDashboard() {
   const [title, setTitle] = useState('');
