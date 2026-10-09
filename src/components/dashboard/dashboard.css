@@ -492,6 +492,14 @@ button.dash-recipient:disabled {
 .dash-pill.is-ok { color: var(--dash-ok); background: rgba(52, 211, 166, 0.12); }
 .dash-pill.is-warn { color: var(--dash-warn); background: rgba(245, 176, 75, 0.12); }
 .dash-pill.is-muted { color: var(--dash-muted); background: rgba(255, 255, 255, 0.06); }
+.dash-pill.is-single { color: #7cc4ff; background: rgba(124, 196, 255, 0.12); }
+.dash-pill.is-linked { color: #ff8fab; background: rgba(255, 64, 105, 0.13); }
+
+.dash-pills {
+  display: flex;
+  flex-shrink: 0;
+  gap: 0.35rem;
+}
 
 /* Screen picker */
 .dash-screens {
@@ -529,17 +537,6 @@ button.dash-recipient:disabled {
   color: #fff;
   background: var(--dash-accent-soft);
   border-color: var(--dash-accent);
-}
-
-.dash-screen-tag {
-  font-size: 0.65rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--dash-faint);
-}
-
-.dash-screen.is-active .dash-screen-tag {
-  color: var(--dash-accent-text);
 }
 
 /* Buttons */
@@ -662,16 +659,61 @@ button.dash-recipient:disabled {
   animation: dash-fade 0.3s var(--dash-ease) both;
 }
 
-.dash-result.is-success {
-  color: var(--dash-ok);
-  background: rgba(52, 211, 166, 0.1);
+.dash-result.is-ok {
+  background: rgba(52, 211, 166, 0.08);
   border: 1px solid rgba(52, 211, 166, 0.25);
 }
 
+.dash-result.is-warn {
+  background: rgba(245, 176, 75, 0.08);
+  border: 1px solid rgba(245, 176, 75, 0.3);
+}
+
 .dash-result.is-error {
-  color: var(--dash-error);
-  background: rgba(255, 92, 124, 0.1);
-  border: 1px solid rgba(255, 92, 124, 0.25);
+  background: rgba(255, 92, 124, 0.08);
+  border: 1px solid rgba(255, 92, 124, 0.3);
+}
+
+.dash-result-title {
+  font-weight: 600;
+  margin-bottom: 0.4rem;
+}
+
+.dash-result.is-ok .dash-result-title { color: var(--dash-ok); }
+.dash-result.is-warn .dash-result-title { color: var(--dash-warn); }
+.dash-result.is-error .dash-result-title,
+.dash-result.is-error:not(:has(.dash-result-title)) { color: var(--dash-error); }
+
+.dash-outcomes {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  color: var(--dash-text);
+}
+
+.dash-outcomes li {
+  display: flex;
+  gap: 0.55rem;
+  align-items: baseline;
+}
+
+.dash-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  transform: translateY(-1px);
+}
+
+.dash-dot.is-ok { background: var(--dash-ok); }
+.dash-dot.is-warn { background: var(--dash-warn); }
+.dash-dot.is-error { background: var(--dash-error); }
+
+.dash-result-note {
+  margin-top: 0.6rem;
+  font-size: 0.75rem;
+  color: var(--dash-muted);
 }
 
 /* Phone preview — frame image from the Meaamor website, screen inset to match it */

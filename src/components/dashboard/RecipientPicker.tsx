@@ -1,11 +1,38 @@
 import { useEffect, useState } from 'react';
 import { callNotificationFunction, errorMessage } from './api';
-import type { UserSearchResult } from './types';
+import { STALE_DEVICE_DAYS, deviceFreshness, isLinked, timeAgo, type UserSearchResult } from './types';
 
 interface RecipientPickerProps {
   mode: 'Person' | 'Couple';
   selected: UserSearchResult | null;
   onSelect: (user: UserSearchResult | null) => void;
+}
+
+function TypePill({ user }: { user: UserSearchResult }) {
+  return isLinked(user)
+    ? <span className="dash-pill is-linked">In a couple</span>
+    : <span className="dash-pill is-single">Single</span>;
+}
+
+// How recently this person's phone registered for pushes — a stale one may be an old phone
+function DevicePill({ user }: { user: UserSearchResult }) {
+  if (!user.hasDevice) return <span className="dash-pill is-warn">No device</span>;
+  const freshness = deviceFreshness(user.deviceUpdatedAt);
+  if (freshness === 'unknown') {
+    return (
+      <span className="dash-pill is-muted" title="Registered by an older app version, so we don't know when">
+        Device · age unknown
+      </span>
+    );
+  }
+  return (
+    <span
+      className={`dash-pill ${freshness === 'stale' ? 'is-warn' : 'is-ok'}`}
+      title={freshness === 'stale' ? `Not registered in ${STALE_DEVICE_DAYS}+ days — may be an old phone` : 'Registered recently'}
+    >
+      Device · {timeAgo(user.deviceUpdatedAt!)}
+    </span>
+  );
 }
 
 function initials(name: string) {
@@ -70,11 +97,12 @@ export function RecipientPicker({ mode, selected, onSelect }: RecipientPickerPro
               ? `${selected.name || 'Unnamed'} & ${selected.partnerName || 'Partner'}`
               : selected.name || 'Unnamed'}
           </div>
-          <div className="dash-recipient-meta">
-            {selected.email || selected.id}
-            {!selected.hasDevice && <span className="dash-warn"> · no registered device</span>}
-          </div>
+          <div className="dash-recipient-meta">{selected.email || selected.id}</div>
         </div>
+        <span className="dash-pills">
+          {!couple && <TypePill user={selected} />}
+          <DevicePill user={selected} />
+        </span>
         <button
           type="button"
           className="dash-btn dash-btn-ghost dash-btn-sm"
@@ -120,7 +148,7 @@ export function RecipientPicker({ mode, selected, onSelect }: RecipientPickerPro
       {showResults && results.length > 0 && (
         <ul className="dash-results">
           {results.map((user) => {
-            const notLinked = mode === 'Couple' && !user.partnerId;
+            const notLinked = mode === 'Couple' && !isLinked(user);
             return (
               <li key={user.id}>
                 <button
@@ -137,13 +165,10 @@ export function RecipientPicker({ mode, selected, onSelect }: RecipientPickerPro
                     </span>
                     <span className="dash-recipient-meta">{user.email || user.id}</span>
                   </span>
-                  {notLinked ? (
-                    <span className="dash-pill is-muted">Not linked</span>
-                  ) : user.hasDevice ? (
-                    <span className="dash-pill is-ok">Device ready</span>
-                  ) : (
-                    <span className="dash-pill is-warn">No device</span>
-                  )}
+                  <span className="dash-pills">
+                    <TypePill user={user} />
+                    {!notLinked && <DevicePill user={user} />}
+                  </span>
                 </button>
               </li>
             );

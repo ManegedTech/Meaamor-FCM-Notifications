@@ -5,13 +5,16 @@ import { callNotificationFunction, errorMessage } from './dashboard/api';
 import { ConfirmDialog } from './dashboard/ConfirmDialog';
 import { PhonePreview } from './dashboard/PhonePreview';
 import { RecipientPicker } from './dashboard/RecipientPicker';
+import { SendResult, type SendSummary } from './dashboard/SendResult';
 import { SegmentedControl } from './dashboard/SegmentedControl';
 import {
   BODY_LIMIT,
-  SCREENS,
   TITLE_LIMIT,
+  isLinked,
+  screensFor,
   type AccountStatus,
   type Audience,
+  type RecipientKind,
   type UserSearchResult,
 } from './dashboard/types';
 import './dashboard/dashboard.css';
@@ -22,7 +25,6 @@ const MIN_AGE = 18;
 const MAX_AGE = 100;
 
 type SendKind = 'audience' | 'test';
-type Result = { type: 'success' | 'error'; message: string };
 
 const numberFormat = new Intl.NumberFormat('en-US');
 
@@ -67,7 +69,7 @@ export function AdminDashboard() {
 
   // Sending
   const [sending, setSending] = useState<SendKind | null>(null);
-  const [result, setResult] = useState<Result | null>(null);
+  const [result, setResult] = useState<SendSummary | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   // Restore the caret after a placeholder insert re-renders the field
@@ -183,7 +185,23 @@ export function AdminDashboard() {
   // Keep focus (and the selection) in the field when a placeholder chip is pressed
   const keepFieldFocus = (e: React.MouseEvent) => e.preventDefault();
 
-  const selectedScreen = SCREENS.find((s) => s.id === screen) ?? SCREENS[0];
+  // Which screens make sense depends on whether recipients are single or in a couple
+  const recipientKind: RecipientKind = (() => {
+    if (audience === 'Couple') return 'linked';
+    if (audience === 'Person') return selectedUser ? (isLinked(selectedUser) ? 'linked' : 'single') : 'mixed';
+    if (status === 'Linked') return 'linked';
+    if (status === 'Single') return 'single';
+    return 'mixed';
+  })();
+  const availableScreens = screensFor(recipientKind);
+  // Fall back to Home when the picked screen doesn't exist for these recipients
+  const selectedScreen = availableScreens.find((s) => s.id === screen) ?? availableScreens[0];
+  const screenHint = (() => {
+    if (recipientKind === 'linked') return 'Showing screens couples have.';
+    if (recipientKind === 'single') return 'Showing screens single users have.';
+    if (audience === 'Person') return 'Pick a person to see screens for their account type.';
+    return 'Showing screens every user has. Filter to Single or Linked for more.';
+  })();
   const previewName = selectedUser?.name || 'Asha';
   const previewPartner = selectedUser?.partnerName || 'Ravi';
   const personalize = (text: string) =>
@@ -240,20 +258,25 @@ export function AdminDashboard() {
     const payload: Record<string, unknown> = {
       messageTitle: title,
       messageBody: body,
-      screen,
+      screen: selectedScreen.id,
     };
     if (kind === 'test') payload.targets = { self: true };
     else if (isTargeted) payload.targets = { userIds: recipientIds() };
     else payload.filters = filters;
 
     try {
-      const response = await callNotificationFunction(payload);
+      const response = await callNotificationFunction<Omit<SendSummary, 'ok' | 'message'>>(payload);
       setResult({
-        type: response.success ? 'success' : 'error',
+        ok: response.success,
         message: response.message || (response.success ? 'Sent.' : 'Sending failed.'),
+        recipients: response.recipients,
+        successCount: response.successCount,
+        failureCount: response.failureCount,
+        deadTokenCount: response.deadTokenCount,
+        deviceFreshness: response.deviceFreshness,
       });
     } catch (err) {
-      setResult({ type: 'error', message: errorMessage(err) });
+      setResult({ ok: false, message: errorMessage(err) });
     } finally {
       setSending(null);
     }
@@ -438,25 +461,20 @@ export function AdminDashboard() {
               <h2>When tapped, open</h2>
             </div>
             <div className="dash-screens" role="radiogroup" aria-label="Screen to open">
-              {SCREENS.map((s) => (
+              {availableScreens.map((s) => (
                 <button
                   key={s.id}
                   type="button"
                   role="radio"
-                  aria-checked={screen === s.id}
-                  className={`dash-screen ${screen === s.id ? 'is-active' : ''}`}
+                  aria-checked={selectedScreen.id === s.id}
+                  className={`dash-screen ${selectedScreen.id === s.id ? 'is-active' : ''}`}
                   onClick={() => setScreen(s.id)}
                 >
                   {s.label}
-                  {s.couplesOnly && <span className="dash-screen-tag">Couples</span>}
                 </button>
               ))}
             </div>
-            {selectedScreen.couplesOnly && (
-              <p className="dash-hint">
-                {selectedScreen.label} is only on linked users’ home tabs. Single users will land on a different tab.
-              </p>
-            )}
+            <p className="dash-hint">{screenHint}</p>
           </section>
         </div>
 
@@ -492,11 +510,7 @@ export function AdminDashboard() {
             </button>
             {!hasMessage && <p className="dash-hint dash-center">Add a title and message to send.</p>}
 
-            {result && (
-              <div className={`dash-result is-${result.type}`} role="status">
-                {result.message}
-              </div>
-            )}
+            {result && <SendResult summary={result} />}
           </section>
         </aside>
       </form>
