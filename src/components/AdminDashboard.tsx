@@ -1,279 +1,522 @@
-import React, { useState, useEffect } from 'react';
-import { functions, account } from '../lib/appwrite';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { account } from '../lib/appwrite';
+import { callNotificationFunction, errorMessage } from './dashboard/api';
+import { ConfirmDialog } from './dashboard/ConfirmDialog';
+import { PhonePreview } from './dashboard/PhonePreview';
+import { RecipientPicker } from './dashboard/RecipientPicker';
+import { SegmentedControl } from './dashboard/SegmentedControl';
+import {
+  BODY_LIMIT,
+  SCREENS,
+  TITLE_LIMIT,
+  type AccountStatus,
+  type Audience,
+  type UserSearchResult,
+} from './dashboard/types';
+import './dashboard/dashboard.css';
+
+const AUDIENCES: Audience[] = ['Everyone', 'Person', 'Couple'];
+const STATUSES: AccountStatus[] = ['All', 'Single', 'Linked'];
+const MIN_AGE = 18;
+const MAX_AGE = 100;
+
+type SendKind = 'audience' | 'test';
+type Result = { type: 'success' | 'error'; message: string };
+
+const numberFormat = new Intl.NumberFormat('en-US');
+
+function parseAge(value: string): number | null {
+  if (value.trim() === '') return null;
+  const age = Number(value);
+  return Number.isFinite(age) ? Math.round(age) : null;
+}
+
+function peopleCount(count: number) {
+  return `${numberFormat.format(count)} ${count === 1 ? 'person' : 'people'}`;
+}
 
 export function AdminDashboard() {
-  const [title, setTitle] = useState('');
-  const [body, setBody] = useState('');
-  const [location, setLocation] = useState('');
-  const [status, setStatus] = useState('All'); // 'All' | 'Single' | 'Linked'
-  const [minAge, setMinAge] = useState<number | ''>('');
-  const [maxAge, setMaxAge] = useState<number | ''>('');
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<{ type: 'success' | 'error', message: string } | null>(null);
-
-  const [currentDate, setCurrentDate] = useState('Sunday, October 1');
-  const [currentTime, setCurrentTime] = useState('9:41');
-
-  useEffect(() => {
-    const updateTime = () => {
-      const now = new Date();
-      setCurrentDate(now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }));
-      const hours = now.getHours() % 12 || 12;
-      const minutes = now.getMinutes().toString().padStart(2, '0');
-      setCurrentTime(`${hours}:${minutes}`);
-    };
-    updateTime();
-    const interval = setInterval(updateTime, 60000);
-    return () => clearInterval(interval);
-  }, []);
-
   const navigate = useNavigate();
 
-  const FUNCTION_ID = import.meta.env.VITE_APPWRITE_FUNCTION_ID || 'YOUR_FUNCTION_ID';
+  const [adminEmail, setAdminEmail] = useState('');
+
+  // Message
+  const [title, setTitle] = useState('');
+  const [body, setBody] = useState('');
+  const titleRef = useRef<HTMLInputElement>(null);
+  const bodyRef = useRef<HTMLTextAreaElement>(null);
+  const lastFocused = useRef<'title' | 'body'>('body');
+  const pendingCaret = useRef<{ el: HTMLInputElement | HTMLTextAreaElement; pos: number } | null>(null);
+
+  // Audience
+  const [audience, setAudience] = useState<Audience>('Everyone');
+  const [selectedUser, setSelectedUser] = useState<UserSearchResult | null>(null);
+  const [location, setLocation] = useState('');
+  const [status, setStatus] = useState<AccountStatus>('All');
+  const [minAge, setMinAge] = useState('');
+  const [maxAge, setMaxAge] = useState('');
+
+  // On tap
+  const [screen, setScreen] = useState('home');
+
+  // Reach (Everyone only)
+  const [reach, setReach] = useState<number | null>(null);
+  const [reachLoading, setReachLoading] = useState(false);
+  const [reachError, setReachError] = useState(false);
+
+  // Sending
+  const [sending, setSending] = useState<SendKind | null>(null);
+  const [result, setResult] = useState<Result | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+
+  // Restore the caret after a placeholder insert re-renders the field
+  useLayoutEffect(() => {
+    if (!pendingCaret.current) return;
+    const { el, pos } = pendingCaret.current;
+    pendingCaret.current = null;
+    el.setSelectionRange(pos, pos);
+  });
+
+  useEffect(() => {
+    account.get().then((user) => setAdminEmail(user.email)).catch(() => {});
+  }, []);
+
+  const isTargeted = audience !== 'Everyone';
+  const isCouple = audience === 'Couple';
+
+  const minAgeNum = parseAge(minAge);
+  const maxAgeNum = parseAge(maxAge);
+  const ageError =
+    (minAgeNum !== null && (minAgeNum < MIN_AGE || minAgeNum > MAX_AGE)) ||
+    (maxAgeNum !== null && (maxAgeNum < MIN_AGE || maxAgeNum > MAX_AGE))
+      ? `Ages must be between ${MIN_AGE} and ${MAX_AGE}.`
+      : minAgeNum !== null && maxAgeNum !== null && minAgeNum > maxAgeNum
+        ? 'Min age can’t be above max age.'
+        : '';
+
+  const filters = useMemo(() => ({
+    ...(location.trim() && { location: location.trim() }),
+    ...(status !== 'All' && { status: status.toLowerCase() }),
+    ...(minAgeNum !== null && { minAge: minAgeNum }),
+    ...(maxAgeNum !== null && { maxAge: maxAgeNum }),
+  }), [location, status, minAgeNum, maxAgeNum]);
+  const filtersKey = JSON.stringify(filters);
+  const hasFilters = filtersKey !== '{}';
+
+  // Live count of users a broadcast would reach
+  useEffect(() => {
+    if (isTargeted || ageError) return;
+
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      setReachLoading(true);
+      setReachError(false);
+      try {
+        const response = await callNotificationFunction<{ count: number }>({
+          action: 'count',
+          filters: JSON.parse(filtersKey),
+        });
+        if (cancelled) return;
+        if (response.success && typeof response.count === 'number') {
+          setReach(response.count);
+        } else {
+          setReach(null);
+          setReachError(true);
+        }
+      } catch {
+        if (!cancelled) {
+          setReach(null);
+          setReachError(true);
+        }
+      } finally {
+        if (!cancelled) setReachLoading(false);
+      }
+    }, 400);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [filtersKey, isTargeted, ageError]);
 
   const handleLogout = async () => {
     try {
       await account.deleteSession('current');
-    } catch(e) {}
+    } catch {
+      // Already signed out
+    }
     navigate('/');
   };
-  const handleSend = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
+
+  const changeAudience = (next: Audience) => {
+    setAudience(next);
+    setSelectedUser(null);
+    setResult(null);
+  };
+
+  const resetFilters = () => {
+    setLocation('');
+    setStatus('All');
+    setMinAge('');
+    setMaxAge('');
+  };
+
+  // Insert a placeholder at the cursor of whichever field was focused last
+  const insertVariable = (token: string) => {
+    const isTitle = lastFocused.current === 'title';
+    const el = isTitle ? titleRef.current : bodyRef.current;
+    const value = isTitle ? title : body;
+    const limit = isTitle ? TITLE_LIMIT : BODY_LIMIT;
+    const start = el?.selectionStart ?? value.length;
+    const end = el?.selectionEnd ?? value.length;
+    const next = (value.slice(0, start) + token + value.slice(end)).slice(0, limit);
+
+    if (el) {
+      el.focus();
+      pendingCaret.current = { el, pos: Math.min(start + token.length, next.length) };
+    }
+    if (isTitle) setTitle(next);
+    else setBody(next);
+  };
+
+  // Keep focus (and the selection) in the field when a placeholder chip is pressed
+  const keepFieldFocus = (e: React.MouseEvent) => e.preventDefault();
+
+  const selectedScreen = SCREENS.find((s) => s.id === screen) ?? SCREENS[0];
+  const previewName = selectedUser?.name || 'Asha';
+  const previewPartner = selectedUser?.partnerName || 'Ravi';
+  const personalize = (text: string) =>
+    text.replace(/\$name/g, previewName).replace(/\$partner/g, previewPartner);
+
+  const recipientIds = (): string[] => {
+    if (!selectedUser) return [];
+    if (isCouple && selectedUser.partnerId) return [selectedUser.id, selectedUser.partnerId];
+    return [selectedUser.id];
+  };
+
+  const audienceLabel = (() => {
+    if (audience === 'Person') return selectedUser ? selectedUser.name || 'Unnamed' : 'No one selected';
+    if (audience === 'Couple') {
+      return selectedUser ? `${selectedUser.name || 'Unnamed'} & ${selectedUser.partnerName || 'Partner'}` : 'No couple selected';
+    }
+    const parts = [
+      status !== 'All' ? status : null,
+      location.trim() || null,
+      minAgeNum !== null || maxAgeNum !== null ? `Age ${minAgeNum ?? MIN_AGE}–${maxAgeNum ?? MAX_AGE}` : null,
+    ].filter(Boolean);
+    return parts.length > 0 ? parts.join(' · ') : 'All users';
+  })();
+
+  const reachLabel = (() => {
+    if (isTargeted) {
+      if (!selectedUser) return '—';
+      return isCouple ? '2 people' : '1 person';
+    }
+    if (ageError) return '—';
+    if (reachLoading && reach === null) return 'Counting…';
+    if (reachError) return 'Unavailable';
+    if (reach === null) return '—';
+    return peopleCount(reach);
+  })();
+
+  const hasMessage = title.trim() !== '' && body.trim() !== '';
+  const audienceReady = isTargeted ? Boolean(selectedUser) : !ageError && reach !== 0;
+  const canSend = hasMessage && audienceReady && sending === null;
+
+  const sendLabel = (() => {
+    if (sending === 'audience') return 'Sending…';
+    if (audience === 'Person') return selectedUser ? `Send to ${selectedUser.name || 'person'}` : 'Send';
+    if (audience === 'Couple') return selectedUser ? 'Send to couple' : 'Send';
+    if (reach === 0) return 'No one matches';
+    return reach !== null ? `Send to ${peopleCount(reach)}` : 'Send to everyone';
+  })();
+
+  const send = async (kind: SendKind) => {
+    setConfirmOpen(false);
+    setSending(kind);
     setResult(null);
 
+    const payload: Record<string, unknown> = {
+      messageTitle: title,
+      messageBody: body,
+      screen,
+    };
+    if (kind === 'test') payload.targets = { self: true };
+    else if (isTargeted) payload.targets = { userIds: recipientIds() };
+    else payload.filters = filters;
+
     try {
-      const payload = {
-        messageTitle: title,
-        messageBody: body,
-        filters: {
-          ...(location && { location }),
-          ...(status !== 'All' && { status: status.toLowerCase() }),
-          ...(minAge !== '' && { minAge: Number(minAge) }),
-          ...(maxAge !== '' && { maxAge: Number(maxAge) }),
-        }
-      };
-
-      const response = await functions.createExecution(
-        FUNCTION_ID,
-        JSON.stringify(payload)
-      );
-
-      const parsedResponse = JSON.parse(response.responseBody);
-      if (response.status === 'completed' && parsedResponse.success) {
-        setResult({ type: 'success', message: `Success: ${parsedResponse.message}` });
-        // Optional: clear form
-        setTitle('');
-        setBody('');
-      } else {
-        setResult({ type: 'error', message: `Error: ${parsedResponse.message || 'Function execution failed'}` });
-      }
-    } catch (err: any) {
-      setResult({ type: 'error', message: `Execution Error: ${err.message}` });
+      const response = await callNotificationFunction(payload);
+      setResult({
+        type: response.success ? 'success' : 'error',
+        message: response.message || (response.success ? 'Sent.' : 'Sending failed.'),
+      });
+    } catch (err) {
+      setResult({ type: 'error', message: errorMessage(err) });
     } finally {
-      setLoading(false);
+      setSending(null);
     }
   };
 
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canSend) return;
+    // Broadcasts are wide and can't be recalled — always confirm
+    if (isTargeted) send('audience');
+    else setConfirmOpen(true);
+  };
+
   return (
-    <div className="dashboard-container fade-in">
-      <div className="dashboard-header">
-        <h1 className="dashboard-title">Create push message</h1>
-        <button onClick={handleLogout} className="btn-secondary" title="Sign Out" style={{ background: 'transparent', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', borderRadius: '6px', padding: '0.5rem 1rem', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.85rem' }}>
-          Sign out
-        </button>
-      </div>
+    <div className="dash">
+      <header className="dash-header">
+        <div className="dash-brand">
+          <span className="dash-brand-mark" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+              <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+            </svg>
+          </span>
+          <div>
+            <h1>Push notifications</h1>
+            <p>Meaamor admin</p>
+          </div>
+        </div>
+        <div className="dash-header-actions">
+          {adminEmail && <span className="dash-admin">{adminEmail}</span>}
+          <button type="button" className="dash-btn dash-btn-ghost dash-btn-sm" onClick={handleLogout}>
+            Sign out
+          </button>
+        </div>
+      </header>
 
-      <div className="">
-        <form onSubmit={handleSend} className="grid-layout">
-          
-          {/* Column 1: Message Content & Targets */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
-            
-            {/* Message Group */}
-            <div className="form-section">
-              <h3 className="section-title">Message</h3>
-              
-              <div className="input-group">
-                <label>Title</label>
-                <input 
-                  type="text" 
-                  className="custom-input"
-                  value={title} 
-                  onChange={(e) => setTitle(e.target.value.substring(0, 50))} 
-                  placeholder="Enter title" 
-                  required 
-                />
-              </div>
-              
-              <div className="input-group" style={{ marginBottom: 0 }}>
-                <label>Message</label>
-                <textarea 
-                  className="custom-textarea"
-                  value={body} 
-                  onChange={(e) => setBody(e.target.value.substring(0, 1000))} 
-                  placeholder="e.g. Hello $name, check out our new update." 
-                  required 
-                  rows={4}
-                  style={{ minHeight: '120px' }}
-                />
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginTop: '0.5rem', gap: '1rem' }}>
-                  <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', lineHeight: '1.4' }}>
-                    Use <strong>$name</strong> to insert the user's name dynamically.
-                  </div>
-                  <div className={`char-counter ${body.length >= 950 ? 'error' : body.length >= 800 ? 'warning' : ''}`} style={{ marginTop: 0, whiteSpace: 'nowrap' }}>
-                    {body.length}/1000
-                  </div>
-                </div>
-              </div>
+      <form className="dash-layout" onSubmit={handleSubmit}>
+        <div className="dash-main">
+          {/* 1. Message */}
+          <section className="dash-card">
+            <div className="dash-card-head">
+              <span className="dash-step">1</span>
+              <h2>Message</h2>
+              {(title || body) && (
+                <button
+                  type="button"
+                  className="dash-link"
+                  onClick={() => { setTitle(''); setBody(''); setResult(null); }}
+                >
+                  Clear
+                </button>
+              )}
             </div>
 
-            {/* Target Filters Group */}
-            <div className="form-section">
-              <h3 className="section-title">Target Filters</h3>
-              <div className="input-group">
-                <label>Location (Country, City)</label>
-                <input 
-                  type="text" 
-                  className="custom-input"
-                  value={location} 
-                  onChange={(e) => setLocation(e.target.value)} 
-                  placeholder="e.g. India" 
+            <div className="dash-field">
+              <div className="dash-label-row">
+                <label htmlFor="push-title">Title</label>
+                <span className="dash-counter">{title.length}/{TITLE_LIMIT}</span>
+              </div>
+              <input
+                id="push-title"
+                ref={titleRef}
+                type="text"
+                className="dash-input"
+                value={title}
+                maxLength={TITLE_LIMIT}
+                onFocus={() => { lastFocused.current = 'title'; }}
+                onChange={(e) => setTitle(e.target.value)}
+                placeholder="e.g. Your daily quiz is ready"
+              />
+            </div>
+
+            <div className="dash-field">
+              <div className="dash-label-row">
+                <label htmlFor="push-body">Message</label>
+                <span className={`dash-counter ${body.length >= BODY_LIMIT * 0.95 ? 'is-error' : body.length >= BODY_LIMIT * 0.8 ? 'is-warn' : ''}`}>
+                  {body.length}/{BODY_LIMIT}
+                </span>
+              </div>
+              <textarea
+                id="push-body"
+                ref={bodyRef}
+                className="dash-input dash-textarea"
+                value={body}
+                maxLength={BODY_LIMIT}
+                rows={4}
+                onFocus={() => { lastFocused.current = 'body'; }}
+                onChange={(e) => setBody(e.target.value)}
+                placeholder="e.g. Hey $name, see how well you know $partner today."
+              />
+              <div className="dash-variables">
+                <span>Insert</span>
+                <button type="button" className="dash-chip" onMouseDown={keepFieldFocus} onClick={() => insertVariable('$name')}>
+                  $name
+                </button>
+                <button type="button" className="dash-chip" onMouseDown={keepFieldFocus} onClick={() => insertVariable('$partner')}>
+                  $partner
+                </button>
+              </div>
+            </div>
+          </section>
+
+          {/* 2. Audience */}
+          <section className="dash-card">
+            <div className="dash-card-head">
+              <span className="dash-step">2</span>
+              <h2>Audience</h2>
+              {!isTargeted && hasFilters && (
+                <button type="button" className="dash-link" onClick={resetFilters}>
+                  Reset filters
+                </button>
+              )}
+            </div>
+
+            <SegmentedControl label="Audience" options={AUDIENCES} value={audience} onChange={changeAudience} />
+
+            <div className="dash-audience-body" key={audience}>
+              {isTargeted ? (
+                <RecipientPicker
+                  mode={audience as 'Person' | 'Couple'}
+                  selected={selectedUser}
+                  onSelect={(user) => { setSelectedUser(user); setResult(null); }}
                 />
-              </div>
-
-              <div className="input-group">
-                <label>Account Status</label>
-                <div className="sliding-toggle-track" onClick={(e) => {
-                  const rect = e.currentTarget.getBoundingClientRect();
-                  const x = e.clientX - rect.left;
-                  if (x < rect.width / 3) setStatus('All');
-                  else if (x < (rect.width / 3) * 2) setStatus('Single');
-                  else setStatus('Linked');
-                }}>
-                  <div 
-                    className="sliding-toggle-indicator"
-                    style={{
-                      width: 'calc(33.33% - 8px)',
-                      transform: `translateX(${status === 'All' ? '0' : status === 'Single' ? '100%' : '200%'})`
-                    }}
-                  />
-                  <div className={`sliding-toggle-option ${status === 'All' ? 'active' : 'inactive'}`}>All</div>
-                  <div className={`sliding-toggle-option ${status === 'Single' ? 'active' : 'inactive'}`}>Single</div>
-                  <div className={`sliding-toggle-option ${status === 'Linked' ? 'active' : 'inactive'}`}>Linked</div>
-                </div>
-              </div>
-
-              <div className="grid-row-2">
-                <div className="input-group">
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <label>Min Age</label>
-                    <span style={{ fontSize: '0.9rem', color: '#fff', fontWeight: 600 }}>{minAge || 18}</span>
+              ) : (
+                <div className="dash-filters">
+                  <div className="dash-field">
+                    <label htmlFor="filter-location">Location</label>
+                    <input
+                      id="filter-location"
+                      type="text"
+                      className="dash-input"
+                      value={location}
+                      onChange={(e) => setLocation(e.target.value)}
+                      placeholder="Any — or a country or city, e.g. India"
+                    />
                   </div>
-                  <input 
-                    type="range"
-                    min="18" max="100"
-                    className="custom-range-slider"
-                    value={minAge || 18} 
-                    onChange={(e) => setMinAge(parseInt(e.target.value))} 
-                  />
-                </div>
-                <div className="input-group">
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <label>Max Age</label>
-                    <span style={{ fontSize: '0.9rem', color: '#fff', fontWeight: 600 }}>{maxAge || 65}</span>
-                  </div>
-                  <input 
-                    type="range"
-                    min="18" max="100"
-                    className="custom-range-slider"
-                    value={maxAge || 65} 
-                    onChange={(e) => setMaxAge(parseInt(e.target.value))} 
-                  />
-                </div>
-              </div>
-            </div>
 
-            {/* Bottom Actions */}
-            <div className="bottom-actions" style={{ display: 'grid', gridTemplateColumns: '1fr 3fr', gap: '0.6rem', marginTop: '0', paddingBottom: '2rem' }}>
-              <button type="button" onClick={() => {setTitle(''); setBody(''); setResult(null);}} className="btn-secondary" style={{ background: 'transparent', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', padding: '0.8rem', borderRadius: '8px', fontWeight: 500, fontSize: '1.05rem' }}>
-                Clear
-              </button>
-              <button type="submit" className="btn-primary" style={{ background: 'var(--primary-purple)', color: '#fff', padding: '0.8rem', borderRadius: '8px', fontWeight: 600, fontSize: '1.1rem' }} disabled={loading}>
-                {loading ? 'Sending...' : 'Send Push Notification'}
-              </button>
+                  <div className="dash-field">
+                    <label>Account status</label>
+                    <SegmentedControl label="Account status" options={STATUSES} value={status} onChange={setStatus} />
+                  </div>
+
+                  <div className="dash-field">
+                    <label htmlFor="filter-min-age">Age range</label>
+                    <div className="dash-age-row">
+                      <input
+                        id="filter-min-age"
+                        type="number"
+                        inputMode="numeric"
+                        className={`dash-input ${ageError ? 'is-invalid' : ''}`}
+                        min={MIN_AGE}
+                        max={MAX_AGE}
+                        value={minAge}
+                        onChange={(e) => setMinAge(e.target.value)}
+                        placeholder="Min (any)"
+                        aria-label="Minimum age"
+                      />
+                      <span className="dash-age-sep">to</span>
+                      <input
+                        type="number"
+                        inputMode="numeric"
+                        className={`dash-input ${ageError ? 'is-invalid' : ''}`}
+                        min={MIN_AGE}
+                        max={MAX_AGE}
+                        value={maxAge}
+                        onChange={(e) => setMaxAge(e.target.value)}
+                        placeholder="Max (any)"
+                        aria-label="Maximum age"
+                      />
+                    </div>
+                    {ageError && <p className="dash-hint is-error">{ageError}</p>}
+                  </div>
+                </div>
+              )}
             </div>
-            
+          </section>
+
+          {/* 3. On tap */}
+          <section className="dash-card">
+            <div className="dash-card-head">
+              <span className="dash-step">3</span>
+              <h2>When tapped, open</h2>
+            </div>
+            <div className="dash-screens" role="radiogroup" aria-label="Screen to open">
+              {SCREENS.map((s) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={screen === s.id}
+                  className={`dash-screen ${screen === s.id ? 'is-active' : ''}`}
+                  onClick={() => setScreen(s.id)}
+                >
+                  {s.label}
+                  {s.couplesOnly && <span className="dash-screen-tag">Couples</span>}
+                </button>
+              ))}
+            </div>
+            {selectedScreen.couplesOnly && (
+              <p className="dash-hint">
+                {selectedScreen.label} is only on linked users’ home tabs. Single users will land on a different tab.
+              </p>
+            )}
+          </section>
+        </div>
+
+        <aside className="dash-side">
+          <PhonePreview title={personalize(title)} body={personalize(body)} />
+
+          <section className="dash-card dash-summary">
+            <dl>
+              <div>
+                <dt>Audience</dt>
+                <dd>{audienceLabel}</dd>
+              </div>
+              <div>
+                <dt>Reach</dt>
+                <dd className={reachLoading ? 'is-loading' : ''}>{reachLabel}</dd>
+              </div>
+              <div>
+                <dt>Opens</dt>
+                <dd>{selectedScreen.label}</dd>
+              </div>
+            </dl>
+
+            <button type="submit" className="dash-btn dash-btn-primary dash-btn-block" disabled={!canSend}>
+              {sendLabel}
+            </button>
+            <button
+              type="button"
+              className="dash-btn dash-btn-ghost dash-btn-block"
+              disabled={!hasMessage || sending !== null}
+              onClick={() => send('test')}
+            >
+              {sending === 'test' ? 'Sending test…' : 'Send a test to me'}
+            </button>
+            {!hasMessage && <p className="dash-hint dash-center">Add a title and message to send.</p>}
+
             {result && (
-              <div style={{ marginTop: '0' }}>
-                <div className={`alert ${result.type === 'success' ? 'alert-success' : 'alert-error'}`}>
-                  {result.message}
-                </div>
+              <div className={`dash-result is-${result.type}`} role="status">
+                {result.message}
               </div>
             )}
+          </section>
+        </aside>
+      </form>
+
+      {confirmOpen && (
+        <ConfirmDialog
+          heading={reach !== null ? `Send to ${peopleCount(reach)}?` : 'Send to everyone?'}
+          confirmLabel="Send now"
+          onConfirm={() => send('audience')}
+          onCancel={() => setConfirmOpen(false)}
+        >
+          <div className="dash-dialog-preview">
+            <strong>{personalize(title)}</strong>
+            <span>{personalize(body)}</span>
           </div>
-
-          {/* Column 2: Live Device Preview */}
-          <aside className="preview-container">
-            <div className="mobile-mockup">
-              <div className="mobile-mockup-bg"></div>
-              
-              <div className="mobile-header">
-                <span className="mobile-time" style={{ fontSize: '0.9rem', fontWeight: 600 }}>{currentTime}</span>
-                <div className="mobile-dynamic-island"></div>
-                <div className="mobile-signals" style={{ display: 'flex', gap: '5px', alignItems: 'center' }}>
-                  {/* Cellular */}
-                  <svg width="17" height="11" viewBox="0 0 17 11" fill="none">
-                    <rect x="0" y="7" width="2.5" height="4" rx="0.5" fill="#fff"/>
-                    <rect x="4.5" y="5" width="2.5" height="6" rx="0.5" fill="#fff"/>
-                    <rect x="9" y="3" width="2.5" height="8" rx="0.5" fill="#fff"/>
-                    <rect x="13.5" y="0" width="2.5" height="11" rx="0.5" fill="#fff"/>
-                  </svg>
-                  {/* WiFi */}
-                  <svg width="15" height="11" viewBox="0 0 15 11" fill="none">
-                    <path d="M7.5 11C8.32843 11 9 10.3284 9 9.5C9 8.67157 8.32843 8 7.5 8C6.67157 8 6 8.67157 6 9.5C6 10.3284 6.67157 11 7.5 11Z" fill="#fff"/>
-                    <path d="M4.67157 6.67157C6.2337 5.10945 8.7663 5.10945 10.3284 6.67157" stroke="#fff" strokeWidth="1.8" strokeLinecap="round"/>
-                    <path d="M2.55025 4.55025C5.284 1.8165 9.716 1.8165 12.4497 4.55025" stroke="#fff" strokeWidth="1.8" strokeLinecap="round"/>
-                  </svg>
-                  {/* Battery */}
-                  <svg width="24" height="11" viewBox="0 0 24 11" fill="none">
-                    <rect x="0.5" y="0.5" width="20" height="10" rx="3.5" stroke="#fff" strokeWidth="1"/>
-                    <rect x="2" y="2" width="13" height="7" rx="2" fill="#fff"/>
-                    <path d="M22 3.5V7.5" stroke="#fff" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round"/>
-                  </svg>
-                </div>
-              </div>
-
-              <div className="mobile-lock-time">
-                <div className="date">{currentDate}</div>
-                <div className="time">{currentTime}</div>
-              </div>
-              
-              <div className="ios-notification">
-                <div className="ios-notification-header">
-                  <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
-                    <div className="ios-notification-app-icon" style={{ background: '#2E332E', borderRadius: '4px', overflow: 'hidden' }}>
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
-                        <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
-                      </svg>
-                    </div>
-                    <span style={{ fontWeight: 600, letterSpacing: '0.2px', fontSize: '0.85rem' }}>Meaamor</span>
-                  </div>
-                  <span style={{ marginLeft: 'auto', fontWeight: 400, opacity: 0.7 }}>now</span>
-                </div>
-                <div className="ios-notification-title">
-                  {title || 'Message Title'}
-                </div>
-                <div className="ios-notification-body">
-                  {body ? body.replace('$name', 'User') : 'Enter your message in the input field on the left to see it here'}
-                </div>
-              </div>
-            </div>
-          </aside>
-        </form>
-      </div>
+          <p className="dash-hint">
+            Audience: {audienceLabel}. Sent notifications can’t be recalled — consider sending a test to yourself first.
+          </p>
+        </ConfirmDialog>
+      )}
     </div>
   );
 }
